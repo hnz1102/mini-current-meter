@@ -1,0 +1,10 @@
+[mini-current-meter]
+wifi_ssid = "XXXXXXXXXXXX"
+wifi_psk = "XXXXXXXXXXXXX"
+shunt_resistance = "0.005"
+influxdb_server = "<IP Address>:8086"
+influxdb_api_key = "<API_KEY>"
+influxdb_api = "/api/v2/write?org=<ORG>&bucket=LOGGER&precision=ns"
+influxdb_tag = "ch"
+influxdb_measurement = "minicurrent"
+max_records = "1023"
