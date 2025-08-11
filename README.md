@@ -17,6 +17,8 @@ This tool provides a logging function that captures data on voltage, current and
 
 **Transfer measurement data via WiFi** - This logger can transfer data to a Linux PC via WiFi network and you can view the dashboard graph in InfluxDB.
 
+**Calibration Function** - Built-in calibration functionality with persistent storage. Long press the center button for 2+ seconds to perform automatic calibration that corrects voltage and current measurement offsets. Calibration results are automatically saved to non-volatile storage and restored on power-up.
+
 **Change Channel** - This logger allows you to change the measurement channel by pushing the center button with a pin. Once you push the center button, the channel will change to the next channel. The channel cycles through 1, 2, 3, 4, and back to 1.
 
 **Battery Powered** - Uses LiPo battery. It can run for 12 hours on a single charge. The battery is charged via USB Type-C port.
@@ -53,6 +55,52 @@ These meters are small and light, so you can use them in various locations. For 
 To charge the battery, simply connect to a USB Type-C port from a bus-powered USB port. During charging, the CHG LED is RED. After charging is complete, the FUL LED is GREEN and charging will stop automatically. However,
 
 DO NOT CONTINUE CHARGING IF THE BATTERY IS FULL FOR A LONG TIME.
+
+# Calibration Function
+
+The Mini Current Meter includes built-in calibration functionality to correct measurement offsets and improve accuracy.
+
+## How to Perform Calibration
+
+1. **Prepare for calibration**: Ensure no current is flowing through the shunt resistor and no voltage is applied to the measurement inputs (VBUS/VIN+ and GND should be at the same potential).
+
+2. **Start calibration**: Press and hold the center button for **2-5 seconds**. The display will show "Calibrating..." message.
+
+3. **Calibration process**: The device automatically takes 300 samples over 3 seconds to calculate average voltage and current offsets.
+
+4. **Completion**: When calibration is complete, the display will show "Calibration OK" for 2 seconds, and the offset values will be automatically saved to non-volatile storage.
+
+## Button Functions
+
+- **Short press** (< 2 seconds): Change measurement channel (1-4)
+- **Long press** (2+ seconds): Perform calibration
+
+## Calibration Features
+
+- **Automatic offset correction**: Calibration corrects both voltage and current measurement offsets
+- **Persistent storage**: Calibration results are automatically saved to NVS (Non-Volatile Storage) and restored on power-up
+- **High accuracy**: Uses 300-sample averaging for precise offset calculation
+- **User feedback**: Real-time status display during calibration process
+
+## When to Calibrate
+
+- **Initial setup**: Perform calibration when first using the device
+- **Temperature changes**: Recalibrate if operating temperature changes significantly
+- **Accuracy concerns**: If measurements appear to have a systematic offset
+- **After firmware updates**: Recalibration recommended after major firmware changes
+
+**Note**: Always ensure zero current flow and zero voltage difference during calibration for best results.
+
+# Recent Updates
+
+## Version 2025.08 - Calibration and Accuracy Improvements
+
+- **Added calibration functionality**: Built-in calibration system with persistent storage
+- **Improved measurement accuracy**: Automatic offset correction for voltage and current readings
+- **Enhanced button handling**: Added debouncing and multi-function button support (channel change, calibration, reset)
+- **NVS integration**: Calibration data automatically saved and restored across power cycles
+- **User interface improvements**: Real-time calibration status display and user feedback
+- **Error correction**: Fixed voltage measurement accuracy issues and ADC offset handling
 
 # How to Build from Code and Install to the Unit
 

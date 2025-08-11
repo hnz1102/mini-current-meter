@@ -332,9 +332,9 @@ fn main() -> anyhow::Result<()> {
         static mut BUTTON_PRESS_START_TIME: u64 = 0;
         static mut CALIBRATION_IN_PROGRESS: bool = false;
         static mut MESSAGE_CLEAR_TIME: u64 = 0;
+        static mut LONG_PRESS_TRIGGERED: bool = false;  // Track if long press was already triggered
         
         const LONG_PRESS_TIME_MS: u64 = 2000;  // 2 seconds for calibration
-        const RESET_CALIBRATION_TIME_MS: u64 = 5000;  // 5 seconds to reset calibration
         
         let current_button_state = channel_select_button.is_high();
         let current_time = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis() as u64;
@@ -345,54 +345,24 @@ fn main() -> anyhow::Result<()> {
                 dp.set_err_message("".to_string());
                 MESSAGE_CLEAR_TIME = 0;
             }
+            
             if LAST_BUTTON_STATE && !current_button_state {
                 BUTTON_PRESS_START_TIME = current_time;
+                LONG_PRESS_TRIGGERED = false;  // Reset the trigger flag
                 info!("Button press detected");
             }
             
-            // Check for long press (button still pressed after 2 seconds)
+            // Check for long press (2+ seconds) for calibration
             if !current_button_state && 
                 (current_time - BUTTON_PRESS_START_TIME) >= LONG_PRESS_TIME_MS && 
-                !CALIBRATION_IN_PROGRESS {
+                !CALIBRATION_IN_PROGRESS &&
+                !LONG_PRESS_TRIGGERED {
                 
-                // Check if it's a very long press (5+ seconds) for calibration reset
-                if (current_time - BUTTON_PRESS_START_TIME) >= RESET_CALIBRATION_TIME_MS {
-                    CALIBRATION_IN_PROGRESS = true;
-                    info!("Very long press detected - resetting calibration...");
-                    dp.set_err_message("Reset Calibration".to_string());
-                    
-                    // Reset calibration offsets to zero
-                    average_current_offset = 0.0;
-                    average_voltage_offset = 0.0;
-                    
-                    // Clear calibration data from NVS
-                    match nvs.remove("current_offset") {
-                        Ok(_) => {
-                            info!("Current offset cleared from NVS");
-                        },
-                        Err(e) => {
-                            info!("Failed to clear current offset from NVS: {:?}", e);
-                        }
-                    }
-                    
-                    match nvs.remove("voltage_offset") {
-                        Ok(_) => {
-                            info!("Voltage offset cleared from NVS");
-                        },
-                        Err(e) => {
-                            info!("Failed to clear voltage offset from NVS: {:?}", e);
-                        }
-                    }
-                    
-                    info!("Calibration reset completed - using zero offsets");
-                    dp.set_err_message("Calibration Reset".to_string());
-                    MESSAGE_CLEAR_TIME = current_time + 2000; // Clear after 2 seconds
-                } else {
-                    // Regular long press (2-5 seconds) - start calibration
-                    CALIBRATION_IN_PROGRESS = true;
-                    info!("Long press detected - starting calibration...");
-                    dp.set_err_message("Calibrating...".to_string());
-                
+                CALIBRATION_IN_PROGRESS = true;
+                LONG_PRESS_TRIGGERED = true;
+                info!("Long press detected - starting calibration...");
+                dp.set_err_message("Calibrating...".to_string());
+            
                 // Perform calibration
                 match calibration(&sensor_i2c, current_lsb) {
                     Ok((current_offset, voltage_offset)) => {
@@ -432,7 +402,6 @@ fn main() -> anyhow::Result<()> {
                         MESSAGE_CLEAR_TIME = current_time + 2000; // Clear after 2 seconds
                     }
                 }
-                }
             }
             
             // Button release detected (low to high transition after debounce)
@@ -462,6 +431,7 @@ fn main() -> anyhow::Result<()> {
                 }
                 
                 CALIBRATION_IN_PROGRESS = false;
+                LONG_PRESS_TRIGGERED = false;  // Reset the trigger flag on button release
                 info!("Button released after {}ms", press_duration);
             }
             
