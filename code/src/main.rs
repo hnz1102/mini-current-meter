@@ -28,7 +28,7 @@ use currentlogs::{CurrentRecord, CurrentLog};
 use transfer::Transfer;
 use transfer::ServerInfo;
 
-const ADCRANGE : bool = false; // true: 40.96mV, false: 163.84mV
+const ADCRANGE : bool = true; // true: 40.96mV, false: 163.84mV
 
 #[toml_cfg::toml_config]
 pub struct Config {
@@ -136,7 +136,7 @@ fn main() -> anyhow::Result<()> {
     // INA228 ADC Config
     let read_adc_config = read_ina228_reg16(&sensor_i2c, 0x01)?;
     info!("INA228 ADC Config Read: {:04x}", read_adc_config);
-    let write_adc_config : u16 = (read_adc_config & 0xFFF8) | 0x02; // Clear bits 0-2, 0x00: 1avg, 0x02: 16avg, 0x03: 64avg
+    let write_adc_config : u16 = (read_adc_config & 0xFFF8) | 0x05; // Clear bits 0-2, 0x00: 1avg, 0x02: 16avg, 0x03: 64avg
     write_ina228_reg16(&sensor_i2c, 0x01, write_adc_config)?;
     let read_adc_config = read_ina228_reg16(&sensor_i2c, 0x01)?;
     info!("INA228 ADC Config Set to: {:04x}", read_adc_config);
