@@ -28,6 +28,8 @@ use currentlogs::{CurrentRecord, CurrentLog};
 use transfer::Transfer;
 use transfer::ServerInfo;
 
+const ADCRANGE : bool = false; // true: 40.96mV, false: 163.84mV
+
 #[toml_cfg::toml_config]
 pub struct Config {
     #[default("")]
@@ -38,6 +40,8 @@ pub struct Config {
     influxdb_server: &'static str,
     #[default("0.005")]
     shunt_resistance: &'static str,
+    #[default("50")]
+    shunt_temp_coefficient: &'static str,
     #[default("")]
     influxdb_api_key: &'static str,
     #[default("")]
@@ -84,7 +88,7 @@ fn main() -> anyhow::Result<()> {
 
     // Initialize NVS
     let nvs_default_partition = EspNvsPartition::<NvsDefault>::take().unwrap();
-    let nvs = match EspNvs::new(nvs_default_partition, "storage", true) {
+    let mut nvs = match EspNvs::new(nvs_default_partition, "storage", true) {
         Ok(nvs) => { 
             info!("NVS storage area initialized"); 
             nvs 
@@ -121,54 +125,109 @@ fn main() -> anyhow::Result<()> {
     // Use the shared I2C for INA sensor
     let sensor_i2c = shared_i2c.clone();
 
+    // Initialize INA228 sensor
+    match ADCRANGE {
+        true => write_ina228_reg16(&sensor_i2c, 0x00, 0x0030)?, // Bit4: ADCRANGE=1(40.96mV), Bit5 Enables temperature compensation
+        false => write_ina228_reg16(&sensor_i2c, 0x00, 0x0020)?, // Bit4: ADCRANGE=0(163.84mV), Bit5 Enables temperature compensation
+    }
+    let read_value = read_ina228_reg16(&sensor_i2c, 0x00)?;
+    info!("INA228 Config Set to: {:04x}", read_value);
 
-    let mut config_read_buf = [0u8; 2];
-    let mut config_write_buf = [0u8; 3];
-    // Config
-    {
-        let mut i2c_lock = sensor_i2c.lock().unwrap();
-        i2c_lock.write(0x40, &[0x01u8; 1], BLOCK)?;
-        i2c_lock.read(0x40, &mut config_read_buf, BLOCK)?;
-    }
-    config_write_buf[0] = 0x01;
-    config_write_buf[1] = config_read_buf[0];
-    config_write_buf[2] = (config_read_buf[1] & 0xF8) | 0x03; // 0x00: 1avg, 0x02: 16avg, 0x03: 64avg
-    {
-        let mut i2c_lock = sensor_i2c.lock().unwrap();
-        i2c_lock.write(0x40, &config_write_buf, BLOCK)?;
-    }
+    // INA228 ADC Config
+    let read_adc_config = read_ina228_reg16(&sensor_i2c, 0x01)?;
+    info!("INA228 ADC Config Read: {:04x}", read_adc_config);
+    let write_adc_config : u16 = (read_adc_config & 0xFFF8) | 0x02; // Clear bits 0-2, 0x00: 1avg, 0x02: 16avg, 0x03: 64avg
+    write_ina228_reg16(&sensor_i2c, 0x01, write_adc_config)?;
+    let read_adc_config = read_ina228_reg16(&sensor_i2c, 0x01)?;
+    info!("INA228 ADC Config Set to: {:04x}", read_adc_config);
+
     // SHUNT_CAL
     let shunt_resistance = CONFIG.shunt_resistance.parse::<f32>().unwrap();
-    let current_lsb = 16.384 / 524_288.0;
-    let shunt_cal_val = 13107.2 * current_lsb * 1000_000.0 * shunt_resistance;
-    let shunt_cal = shunt_cal_val as u32;
+    let current_lsb = match ADCRANGE {
+        true => {
+            // 40.96mV range
+            40.96 / 524_288.0
+        },
+        false => {
+            // 163.84mV range
+            163.84 / 524_288.0
+        }
+    };
+    let shunt_cal_val = match ADCRANGE {
+        true => 13107.2 * current_lsb * 1000_000.0 * shunt_resistance * 4.0, // 40.96mV range
+        false => 13107.2 * current_lsb * 1000_000.0 * shunt_resistance, // 163.84mV range
+    };
+    let shunt_cal = shunt_cal_val as u16;
     info!("current_lsb={:?} shunt_cal_val={:?} shunt_cal={:?}", current_lsb, shunt_cal_val, shunt_cal);
-    let mut shunt_cal_buf = [0u8; 3];
-    shunt_cal_buf[0] = 0x02;
-    shunt_cal_buf[1] = (shunt_cal >> 8) as u8;
-    shunt_cal_buf[2] = (shunt_cal & 0xFF) as u8;
-    {
-        let mut i2c_lock = sensor_i2c.lock().unwrap();
-        i2c_lock.write(0x40, &shunt_cal_buf, BLOCK)?;
-    }
-    // calibration read
-    let average_current_offset :f32 = 0.0;
-    let average_voltage_offset :f32 = 0.0;
-    // let (current_offset, voltage_offset) = calibration(&mut i2cdrv, current_lsb)?;
-    // average_current_offset = current_offset;
-    // average_voltage_offset = voltage_offset;    
-    // read back
-    let mut shunt_cal_read_buf = [0u8; 2];
-    {
-        let mut i2c_lock = sensor_i2c.lock().unwrap();
-        i2c_lock.write(0x40, &[0x02u8; 1], BLOCK)?;
-        i2c_lock.read(0x40, &mut shunt_cal_read_buf, BLOCK)?;
-    }
-    if shunt_cal_read_buf[0] != shunt_cal_buf[1] || shunt_cal_read_buf[1] != shunt_cal_buf[2] {
-        info!("shunt_cal_write_buf={:?}", shunt_cal_buf);
-        info!("shunt_cal_read_buf={:?}", shunt_cal_read_buf);
-        info!("Shunt Calibration Error");
-        dp.set_err_message("Shunt Calibration Error".to_string());
+    write_ina228_reg16(&sensor_i2c, 0x02, shunt_cal)?;
+    let read_shunt_cal = read_ina228_reg16(&sensor_i2c, 0x02)?;
+    info!("INA228 SHUNT_CAL Set to: {:04x}", read_shunt_cal);
+    // Shunt Temperature Coefficient
+    let shunt_temp_coefficient = CONFIG.shunt_temp_coefficient.parse::<u16>().unwrap();
+    info!("Shunt Temperature Coefficient: {:?}", shunt_temp_coefficient);
+    write_ina228_reg16(&sensor_i2c, 0x03, shunt_temp_coefficient)?;
+    let read_shunt_temp_coefficient = read_ina228_reg16(&sensor_i2c, 0x03)?;
+    info!("INA228 SHUNT_TEMP_COEFFICIENT Set to: {:04x}", read_shunt_temp_coefficient);
+
+    // Temperature Measurement
+    let temperature: f32 = read_ina228_reg16(&sensor_i2c, 0x06)? as f32 * 7.8125;
+    info!("Initial Temperature Read: {:.2}°C", temperature / 1000.0);
+    
+    // Load calibration offsets from NVS
+    let mut average_current_offset: f32 = {
+        let mut buffer = [0u8; 4];
+        match nvs.get_blob("current_offset", &mut buffer) {
+            Ok(Some(data)) if data.len() == 4 => {
+                let offset_bytes: [u8; 4] = [data[0], data[1], data[2], data[3]];
+                let offset = f32::from_le_bytes(offset_bytes);
+                info!("Loaded current offset from NVS: {:.6}A", offset);
+                offset
+            },
+            Ok(Some(data)) => {
+                info!("Invalid current offset size in NVS (got {} bytes), using default 0.0A", data.len());
+                0.0
+            },
+            Ok(None) => {
+                info!("No current offset found in NVS, using default 0.0A");
+                0.0
+            },
+            Err(e) => {
+                info!("Failed to read current offset from NVS: {:?}, using default 0.0A", e);
+                0.0
+            }
+        }
+    };
+    
+    let mut average_voltage_offset: f32 = {
+        let mut buffer = [0u8; 4];
+        match nvs.get_blob("voltage_offset", &mut buffer) {
+            Ok(Some(data)) if data.len() == 4 => {
+                let offset_bytes: [u8; 4] = [data[0], data[1], data[2], data[3]];
+                let offset = f32::from_le_bytes(offset_bytes);
+                info!("Loaded voltage offset from NVS: {:.6}V", offset);
+                offset
+            },
+            Ok(Some(data)) => {
+                info!("Invalid voltage offset size in NVS (got {} bytes), using default 0.0V", data.len());
+                0.0
+            },
+            Ok(None) => {
+                info!("No voltage offset found in NVS, using default 0.0V");
+                0.0
+            },
+            Err(e) => {
+                info!("Failed to read voltage offset from NVS: {:?}, using default 0.0V", e);
+                0.0
+            }
+        }
+    };
+    
+    // Display loaded calibration info
+    if average_current_offset != 0.0 || average_voltage_offset != 0.0 {
+        info!("Using stored calibration - Current offset: {:.6}A, Voltage offset: {:.6}V", 
+              average_current_offset, average_voltage_offset);
+    } else {
+        info!("No calibration data found - using zero offsets");
     }
 
     // GPIO9 Button for channel selection (polling method)
@@ -268,36 +327,144 @@ fn main() -> anyhow::Result<()> {
             wifi_enable = true;
         }
 
-        // Button polling with debounce
+        // Button polling with debounce and long press detection
         static mut LAST_BUTTON_STATE: bool = true;
-        static mut BUTTON_PRESS_TIME: u64 = 0;
+        static mut BUTTON_PRESS_START_TIME: u64 = 0;
+        static mut CALIBRATION_IN_PROGRESS: bool = false;
+        static mut MESSAGE_CLEAR_TIME: u64 = 0;
+        
+        const LONG_PRESS_TIME_MS: u64 = 2000;  // 2 seconds for calibration
+        const RESET_CALIBRATION_TIME_MS: u64 = 5000;  // 5 seconds to reset calibration
         
         let current_button_state = channel_select_button.is_high();
         let current_time = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis() as u64;
         
         unsafe {
+            // Clear message after timeout
+            if MESSAGE_CLEAR_TIME > 0 && current_time >= MESSAGE_CLEAR_TIME {
+                dp.set_err_message("".to_string());
+                MESSAGE_CLEAR_TIME = 0;
+            }
             if LAST_BUTTON_STATE && !current_button_state {
-                // Button pressed (high to low transition)
-                channel += 1;
-                if channel > 4 {
-                    channel = 1;
-                }
-                tag = format!("ch{}", channel);
-                info!("Channel changed to {}", tag);
-                dp.set_channel(channel as u32);
-                txd.set_tag(tag.clone());
+                BUTTON_PRESS_START_TIME = current_time;
+                info!("Button press detected");
+            }
+            
+            // Check for long press (button still pressed after 2 seconds)
+            if !current_button_state && 
+                (current_time - BUTTON_PRESS_START_TIME) >= LONG_PRESS_TIME_MS && 
+                !CALIBRATION_IN_PROGRESS {
                 
-                // Save current channel to NVS
-                match nvs.set_u8("channel", channel) {
-                    Ok(_) => {
-                        info!("Channel {} saved to NVS", channel);
+                // Check if it's a very long press (5+ seconds) for calibration reset
+                if (current_time - BUTTON_PRESS_START_TIME) >= RESET_CALIBRATION_TIME_MS {
+                    CALIBRATION_IN_PROGRESS = true;
+                    info!("Very long press detected - resetting calibration...");
+                    dp.set_err_message("Reset Calibration".to_string());
+                    
+                    // Reset calibration offsets to zero
+                    average_current_offset = 0.0;
+                    average_voltage_offset = 0.0;
+                    
+                    // Clear calibration data from NVS
+                    match nvs.remove("current_offset") {
+                        Ok(_) => {
+                            info!("Current offset cleared from NVS");
+                        },
+                        Err(e) => {
+                            info!("Failed to clear current offset from NVS: {:?}", e);
+                        }
+                    }
+                    
+                    match nvs.remove("voltage_offset") {
+                        Ok(_) => {
+                            info!("Voltage offset cleared from NVS");
+                        },
+                        Err(e) => {
+                            info!("Failed to clear voltage offset from NVS: {:?}", e);
+                        }
+                    }
+                    
+                    info!("Calibration reset completed - using zero offsets");
+                    dp.set_err_message("Calibration Reset".to_string());
+                    MESSAGE_CLEAR_TIME = current_time + 2000; // Clear after 2 seconds
+                } else {
+                    // Regular long press (2-5 seconds) - start calibration
+                    CALIBRATION_IN_PROGRESS = true;
+                    info!("Long press detected - starting calibration...");
+                    dp.set_err_message("Calibrating...".to_string());
+                
+                // Perform calibration
+                match calibration(&sensor_i2c, current_lsb) {
+                    Ok((current_offset, voltage_offset)) => {
+                        average_current_offset = current_offset;
+                        average_voltage_offset = voltage_offset;
+                        info!("Calibration completed - Current offset: {:.6}A, Voltage offset: {:.6}V", 
+                                current_offset, voltage_offset);
+                        
+                        // Save calibration offsets to NVS
+                        let current_offset_bytes = current_offset.to_le_bytes();
+                        let voltage_offset_bytes = voltage_offset.to_le_bytes();
+                        
+                        match nvs.set_blob("current_offset", &current_offset_bytes) {
+                            Ok(_) => {
+                                info!("Current offset saved to NVS: {:.6}A", current_offset);
+                            },
+                            Err(e) => {
+                                info!("Failed to save current offset to NVS: {:?}", e);
+                            }
+                        }
+                        
+                        match nvs.set_blob("voltage_offset", &voltage_offset_bytes) {
+                            Ok(_) => {
+                                info!("Voltage offset saved to NVS: {:.6}V", voltage_offset);
+                            },
+                            Err(e) => {
+                                info!("Failed to save voltage offset to NVS: {:?}", e);
+                            }
+                        }
+                        
+                        dp.set_err_message("Calibration OK".to_string());
+                        MESSAGE_CLEAR_TIME = current_time + 2000; // Clear after 2 seconds
                     },
                     Err(e) => {
-                        info!("Failed to save channel to NVS: {:?}", e);
+                        info!("Calibration failed: {:?}", e);
+                        dp.set_err_message("Calibration Failed".to_string());
+                        MESSAGE_CLEAR_TIME = current_time + 2000; // Clear after 2 seconds
                     }
-                }                   
-                BUTTON_PRESS_TIME = current_time;
+                }
+                }
             }
+            
+            // Button release detected (low to high transition after debounce)
+            if !LAST_BUTTON_STATE && current_button_state {
+                let press_duration = current_time - BUTTON_PRESS_START_TIME;
+                
+                if !CALIBRATION_IN_PROGRESS && press_duration < LONG_PRESS_TIME_MS {
+                    // Short press - change channel
+                    channel += 1;
+                    if channel > 4 {
+                        channel = 1;
+                    }
+                    tag = format!("ch{}", channel);
+                    info!("Channel changed to {}", tag);
+                    dp.set_channel(channel as u32);
+                    txd.set_tag(tag.clone());
+                    
+                    // Save current channel to NVS
+                    match nvs.set_u8("channel", channel) {
+                        Ok(_) => {
+                            info!("Channel {} saved to NVS", channel);
+                        },
+                        Err(e) => {
+                            info!("Failed to save channel to NVS: {:?}", e);
+                        }
+                    }
+                }
+                
+                CALIBRATION_IN_PROGRESS = false;
+                info!("Button released after {}ms", press_duration);
+            }
+            
             LAST_BUTTON_STATE = current_button_state;
         }
 
@@ -345,8 +512,13 @@ fn main() -> anyhow::Result<()> {
                 // dp.set_message(format!("{:?}", e), true, 1000);
             }
         }
+        // let shunt_voltage_measured = match ADCRANGE {
+        //     true => (read_ina228_reg24(&sensor_i2c, 0x04)? >> 4) as f32 * 78.125,
+        //     false => (read_ina228_reg24(&sensor_i2c, 0x04)? >> 4) as f32 * 312.5,
+        // };
+        // info!("Shunt Voltage Measured: {:.2}nV", shunt_voltage_measured);
         // Power
-        match power_read(&sensor_i2c) {
+        match power_read(&sensor_i2c, current_lsb) {
             Ok(power) => {
                 data.power = power;
             },
@@ -418,7 +590,7 @@ fn voltage_read(shared_i2c: &Arc<Mutex<i2c::I2cDriver>>) -> anyhow::Result<f32> 
     i2c.write(0x40, &[0x05u8; 1], BLOCK)?;
     match i2c.read(0x40, &mut vbus_buf, BLOCK){
         Ok(_v) => {
-            let vbus = ((((vbus_buf[0] as u32) << 16 | (vbus_buf[1] as u32) << 8 | (vbus_buf[2] as u32)) >> 4) as f32 * 193.3125) / 1000_000.0;
+            let vbus = ((((vbus_buf[0] as u32) << 16 | (vbus_buf[1] as u32) << 8 | (vbus_buf[2] as u32)) >> 4) as f32 * 195.3125) / 1000_000.0;
             // info!("vbus_buf={:?} vbus={:?}", vbus_buf, vbus);
             return Ok(vbus);
         },
@@ -429,14 +601,14 @@ fn voltage_read(shared_i2c: &Arc<Mutex<i2c::I2cDriver>>) -> anyhow::Result<f32> 
     }
 }
 
-fn power_read(shared_i2c: &Arc<Mutex<i2c::I2cDriver>>) -> anyhow::Result<f32> {
+fn power_read(shared_i2c: &Arc<Mutex<i2c::I2cDriver>>, current_lsb: f32) -> anyhow::Result<f32> {
     let mut power_buf = [0u8; 3];
     let mut i2c = shared_i2c.lock().unwrap();
     i2c.write(0x40, &[0x08u8; 1], BLOCK)?;
     match i2c.read(0x40, &mut power_buf, BLOCK) {
         Ok(_v) => {
             let power_reg = ((power_buf[0] as u32) << 16 | (power_buf[1] as u32) << 8 | (power_buf[2] as u32)) as f32;
-            let power = 3.2 * 16.384 / 524_288.0 * power_reg;
+            let power = 3.2 * current_lsb * power_reg;
             return Ok(power);
         },
         Err(e) => {
@@ -445,6 +617,33 @@ fn power_read(shared_i2c: &Arc<Mutex<i2c::I2cDriver>>) -> anyhow::Result<f32> {
         }
     }
 }
+
+fn write_ina228_reg16(shared_i2c: &Arc<Mutex<i2c::I2cDriver>>, reg: u8, value: u16) -> anyhow::Result<()> {
+    let mut config = [0u8; 3];
+    config[0] = reg;
+    config[1] = (value >> 8) as u8;
+    config[2] = value as u8;
+    let mut i2c = shared_i2c.lock().unwrap();
+    i2c.write(0x40, &config, BLOCK)?;
+    Ok(())
+}
+
+fn read_ina228_reg16(shared_i2c: &Arc<Mutex<i2c::I2cDriver>>, reg: u8) -> anyhow::Result<u16> {
+    let mut data = [0u8; 2];
+    let mut i2c = shared_i2c.lock().unwrap();
+    i2c.write(0x40, &[reg; 1], BLOCK)?;
+    i2c.read(0x40, &mut data, BLOCK)?;
+    // info!("INA228 Reg {:02x} Read: {:02x} {:02x}", reg, data[0], data[1]);
+    Ok(((data[0] as u16) << 8) | (data[1] as u16))
+}
+
+// fn read_ina228_reg24(shared_i2c: &Arc<Mutex<i2c::I2cDriver>>, reg: u8) -> anyhow::Result<u32> {
+//     let mut data = [0u8; 3];
+//     let mut i2c = shared_i2c.lock().unwrap();
+//     i2c.write(0x40, &[reg; 1], BLOCK)?;
+//     i2c.read(0x40, &mut data, BLOCK)?;
+//     Ok(((data[0] as u32) << 16) | ((data[1] as u32) << 8) | (data[2] as u32))
+// }
 
 fn wifi_reconnect(wifi_dev: &mut Box<EspWifi>, dp: &mut DisplayPanel) -> bool{
     // display on
@@ -456,4 +655,48 @@ fn wifi_reconnect(wifi_dev: &mut Box<EspWifi>, dp: &mut DisplayPanel) -> bool{
         Ok(_) => { info!("Wifi connected"); true},
         Err(ref e) => { info!("{:?}", e); false }
     }
+}
+
+fn calibration(shared_i2c: &Arc<Mutex<i2c::I2cDriver>>, current_lsb: f32) -> anyhow::Result<(f32, f32)> {
+    // INA228 Calibration
+    // Take 300 samples to calculate average offset for current and voltage
+    let mut average_current_offset = 0.0;
+    let mut average_voltage_offset = 0.0;
+    
+    info!("Starting calibration - taking 300 samples over 3 seconds...");
+    
+    for i in 0..300 {
+        match current_read(shared_i2c, current_lsb) {
+            Ok(current) => {
+                average_current_offset += current;
+            },
+            Err(e) => {
+                return Err(anyhow::anyhow!("Current read error during calibration: {:?}", e));
+            }
+        }
+        
+        match voltage_read(shared_i2c) {
+            Ok(voltage) => {
+                average_voltage_offset += voltage;
+            },
+            Err(e) => {
+                return Err(anyhow::anyhow!("Voltage read error during calibration: {:?}", e));
+            }
+        }
+        
+        // Log progress every 50 samples
+        if i % 50 == 0 {
+            info!("Calibration progress: {}/300 samples", i + 1);
+        }
+        
+        thread::sleep(Duration::from_millis(10));
+    }
+    
+    average_current_offset /= 300.0;
+    average_voltage_offset /= 300.0;
+    
+    info!("Calibration completed - Average Current Offset: {:.6}A, Voltage Offset: {:.6}V", 
+          average_current_offset, average_voltage_offset);
+    
+    Ok((average_current_offset, average_voltage_offset))
 }

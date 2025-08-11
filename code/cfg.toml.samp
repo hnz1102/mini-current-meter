@@ -2,6 +2,7 @@
 wifi_ssid = "XXXXXXXXXXXX"
 wifi_psk = "XXXXXXXXXXXXX"
 shunt_resistance = "0.005"
+shunt_temp_coefficient = "50"
 influxdb_server = "<IP Address>:8086"
 influxdb_api_key = "<API_KEY>"
 influxdb_api = "/api/v2/write?org=<ORG>&bucket=LOGGER&precision=ns"

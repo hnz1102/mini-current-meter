@@ -471,7 +471,6 @@ impl DisplayPanel {
                     // Error message if any
                     if !lck.message.is_empty() {
                         display.clear();
-                        Text::new("ERROR:", Point::new(1, 1), style_small).draw(&mut display).unwrap();
                         Text::new(&lck.message, Point::new(1, 8), style_small).draw(&mut display).unwrap();
                     }
 
