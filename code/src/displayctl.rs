@@ -333,7 +333,7 @@ impl DisplayPanel {
                     // Display current with auto-range
                     match lck.current_range {
                         0 => { // mA
-                            Text::new(&format!("I:{:.2}mA", current * 1_000.0), Point::new(1, 15), style_large).draw(&mut display).unwrap();
+                            Text::new(&format!("I:{:.3}mA", current * 1_000.0), Point::new(1, 15), style_large).draw(&mut display).unwrap();
                         },
                         1 => { // A
                             Text::new(&format!("I:{:.4}A", current), Point::new(1, 15), style_large).draw(&mut display).unwrap();

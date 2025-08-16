@@ -29,6 +29,8 @@ use transfer::Transfer;
 use transfer::ServerInfo;
 
 const ADCRANGE : bool = true; // true: 40.96mV, false: 163.84mV
+const CALIBRATION_USE: bool = true;    // Enable or disable calibration
+const WIFI_DELAY_START: u64 = 0;
 
 #[toml_cfg::toml_config]
 pub struct Config {
@@ -136,7 +138,12 @@ fn main() -> anyhow::Result<()> {
     // INA228 ADC Config
     let read_adc_config = read_ina228_reg16(&sensor_i2c, 0x01)?;
     info!("INA228 ADC Config Read: {:04x}", read_adc_config);
-    let write_adc_config : u16 = (read_adc_config & 0xFFF8) | 0x05; // Clear bits 0-2, 0x00: 1avg, 0x02: 16avg, 0x03: 64avg
+    // Mode: 0xF = Continuous bus voltage, shunt voltage and temperature
+    // VBUSCT: 0x5 = 1052us Conversion Time for VBUS
+    // VSHCT: 0x7 = 4120us Conversion Time for shunt voltage measurement
+    // VTCT: 0x5 = 1052us Conversion Time for temperature measurement
+    // AVG: 0x5 = 256 samples ADC sample averaging count, 0x6 = 512 samples, 0x7 = 1024 samples
+    let write_adc_config : u16 = (0xF << 12) | (0x5 << 9) | (0x7 << 6) | (0x5 << 3) | 0x6; 
     write_ina228_reg16(&sensor_i2c, 0x01, write_adc_config)?;
     let read_adc_config = read_ina228_reg16(&sensor_i2c, 0x01)?;
     info!("INA228 ADC Config Set to: {:04x}", read_adc_config);
@@ -223,11 +230,13 @@ fn main() -> anyhow::Result<()> {
     };
     
     // Display loaded calibration info
-    if average_current_offset != 0.0 || average_voltage_offset != 0.0 {
+    if (average_current_offset != 0.0 || average_voltage_offset != 0.0) && CALIBRATION_USE {
         info!("Using stored calibration - Current offset: {:.6}A, Voltage offset: {:.6}V", 
               average_current_offset, average_voltage_offset);
     } else {
         info!("No calibration data found - using zero offsets");
+        average_current_offset = 0.0;
+        average_voltage_offset = 0.0;
     }
 
     // GPIO9 Button for channel selection (polling method)
@@ -239,7 +248,7 @@ fn main() -> anyhow::Result<()> {
     let mut clogs = CurrentRecord::new();
 
     // WiFi
-    let mut wifi_enable : bool;
+    let mut wifi_enable : bool = false;
     let mut wifi_device: Option<Box<EspWifi>>;
     match wifi::wifi_connect(peripherals.modem, CONFIG.wifi_ssid, CONFIG.wifi_psk) {
         Ok(wifi) => { 
@@ -304,27 +313,43 @@ fn main() -> anyhow::Result<()> {
     let mut logging_start = true;
     let mut logging_stopped_by_buffer_full = false;  // Track if logging was stopped due to buffer full
     let mut rssi : i32;
+    if WIFI_DELAY_START > 0 {
+        wifi_device.as_mut().map(|wifi| {
+            wifi::stop_wifi(wifi).unwrap();
+        });
+    }
+    let start_time = SystemTime::now();
     loop {
         thread::sleep(Duration::from_millis(100));
 
-        // Get RSSI
-        rssi = wifi::get_rssi();
-        dp.set_wifi_rssi(rssi);
-        if rssi == 0 {
-            if let Some(ref mut wifi) = wifi_device {
-                if wifi_reconnect(wifi, &mut dp) {
-                    wifi_enable = true;
-                } else {
-                    wifi_enable = false;
-                }
-            } else {
-                dp.set_wifi_status(WifiStatus::Disconnected);
-                wifi_enable = false;
-            }
+        if SystemTime::now().duration_since(start_time).unwrap().as_secs() < WIFI_DELAY_START {
+            wifi_enable = true;
         }
         else {
-            dp.set_wifi_status(WifiStatus::Connected);
-            wifi_enable = true;
+            if wifi_enable == false {
+                if let Some(ref mut wifi) = wifi_device {
+                    wifi_reconnect(wifi, &mut dp);
+                }
+            }
+            // Get RSSI
+            rssi = wifi::get_rssi();
+            dp.set_wifi_rssi(rssi);
+            if rssi == 0 {
+                if let Some(ref mut wifi) = wifi_device {
+                    if wifi_reconnect(wifi, &mut dp) {
+                        wifi_enable = true;
+                    } else {
+                        wifi_enable = false;
+                    }
+                } else {
+                    dp.set_wifi_status(WifiStatus::Disconnected);
+                    wifi_enable = false;
+                }
+            }
+            else {
+                dp.set_wifi_status(WifiStatus::Connected);
+                wifi_enable = true;
+            }
         }
 
         // Button polling with debounce and long press detection

@@ -58,3 +58,8 @@ pub fn get_rssi() -> i32 {
         rssi
     }
 }
+
+pub fn stop_wifi(wifi: &mut EspWifi) -> Result<()> {
+    wifi.stop().map_err(|e| anyhow::anyhow!("Failed to stop WiFi: {:?}", e))?;
+    Ok(())
+}
